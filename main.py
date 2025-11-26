@@ -57,8 +57,18 @@ class AlertStates(StatesGroup):
     waiting_for_price = State()
 
 
-async def fetch_crypto_prices(crypto_ids=None):
+# Cache for prices to reduce API calls
+price_cache = {'data': None, 'timestamp': 0}
+CACHE_DURATION = 60  # Cache for 60 seconds
+
+async def fetch_crypto_prices(crypto_ids=None, use_cache=True):
     """Fetch cryptocurrency prices from CoinGecko API"""
+    # Check cache first
+    if use_cache and price_cache['data'] is not None:
+        if datetime.now().timestamp() - price_cache['timestamp'] < CACHE_DURATION:
+            logger.info("Using cached price data")
+            return price_cache['data']
+    
     if crypto_ids is None:
         crypto_ids = ','.join(CRYPTO_INFO.keys())
     
@@ -71,7 +81,7 @@ async def fetch_crypto_prices(crypto_ids=None):
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(COINGECKO_API, params=params, timeout=10) as response:
+            async with session.get(COINGECKO_API, params=params, timeout=15) as response:
                 if response.status == 200:
                     data = await response.json()
                     result = {}
@@ -82,7 +92,17 @@ async def fetch_crypto_prices(crypto_ids=None):
                                 'change_24h': data[coin_id].get('usd_24h_change'),
                                 'market_cap': data[coin_id].get('usd_market_cap')
                             }
+                    # Update cache
+                    price_cache['data'] = result
+                    price_cache['timestamp'] = datetime.now().timestamp()
                     return result
+                elif response.status == 429:
+                    logger.error("API rate limit exceeded - Too many requests")
+                    # Return cached data if available
+                    if price_cache['data'] is not None:
+                        logger.info("Returning cached data due to rate limit")
+                        return price_cache['data']
+                    return None
                 else:
                     logger.error(f"API request failed with status {response.status}")
                     return None
@@ -155,7 +175,7 @@ def get_main_keyboard():
 
 async def check_price_alerts():
     """Check if any price alerts should be triggered"""
-    prices = await fetch_crypto_prices()
+    prices = await fetch_crypto_prices(use_cache=True)  # Use cache to avoid rate limits
     if not prices:
         return
     
@@ -203,7 +223,7 @@ async def background_price_checker():
     while True:
         try:
             logger.info("Running background price check...")
-            prices = await fetch_crypto_prices('bitcoin,ethereum,the-open-network')
+            prices = await fetch_crypto_prices('bitcoin,ethereum,the-open-network', use_cache=False)
             
             if prices:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -228,7 +248,7 @@ async def background_price_checker():
         except Exception as e:
             logger.error(f"Error in background task: {e}")
         
-        await asyncio.sleep(60)
+        await asyncio.sleep(120)  # Increased to 2 minutes to avoid rate limits
 
 
 @dp.message(Command("start"))
